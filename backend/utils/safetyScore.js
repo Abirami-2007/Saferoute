@@ -1,5 +1,5 @@
 import Incident from "../models/Incident.js";
-import SafetySegment from "../models/SafetySegment.js";
+import { fetchAreaSignals, areaRiskForPoint } from "./chennaiSafetySignals.js";
 
 /**
  * Decodes a Google polyline into an array of [lat, lng] points.
@@ -74,20 +74,12 @@ const NIGHT_MULTIPLIER = {
 
 const SEARCH_RADIUS_METERS = 150;
 
-// Segments are spaced ~100m apart (see scripts/buildSafetyGrid.js), so a
-// point should always have a segment within this radius if the grid has
-// been built for that area.
-const SEGMENT_SEARCH_RADIUS_METERS = 70;
-
 /**
- * Scores a single route by checking each sampled point against:
- *   1. nearby crowdsourced incident reports (live Mongo query — cheap, it's
- *      our own DB), and
- *   2. the precomputed static safety grid (also a Mongo query — NOT a live
- *      OSM/Overpass call. The grid itself is built offline, once per city,
- *      by scripts/buildSafetyGrid.js).
- * Returns a normalized risk score (0 = safest, higher = riskier) plus the
- * raw incident count and flagged-segment count for transparency in the UI.
+ * Scores a single route by checking each sampled point against nearby
+ * incident reports AND OSM-derived area signals (police proximity, activity
+ * density, road classification, and lighting as a minor secondary signal).
+ * Returns a normalized risk score (0 = safest, higher = riskier) plus
+ * breakdown counts for transparency in the UI.
  */
 export async function scoreRoute(encodedPolyline, travelTime = new Date()) {
   const allPoints = decodePolyline(encodedPolyline);
@@ -95,23 +87,25 @@ export async function scoreRoute(encodedPolyline, travelTime = new Date()) {
   const timeOfDay = getTimeOfDay(travelTime);
   const timeMultiplier = NIGHT_MULTIPLIER[timeOfDay];
 
+  // One Overpass call per route (not per point) to stay within fair-use limits.
+  const areaSignals = await fetchAreaSignals(samples);
+
   let totalRisk = 0;
   let incidentCount = 0;
-  let unlitPointCount = 0; // kept as "flagged static-risk points" for the UI
+  let unlitPointCount = 0;
+  let isolatedPointCount = 0;
+  let policeNearbyCount = 0;
   const flaggedSegments = [];
 
   for (const [lat, lng] of samples) {
-    const point = { type: "Point", coordinates: [lng, lat] };
-
-    // Both queries hit our own MongoDB — no external API calls happen here.
-    const [nearbyIncidents, nearestSegment] = await Promise.all([
-      Incident.find({
-        location: { $near: { $geometry: point, $maxDistance: SEARCH_RADIUS_METERS } },
-      }).limit(20),
-      SafetySegment.findOne({
-        location: { $near: { $geometry: point, $maxDistance: SEGMENT_SEARCH_RADIUS_METERS } },
-      }),
-    ]);
+    const nearbyIncidents = await Incident.find({
+      location: {
+        $near: {
+          $geometry: { type: "Point", coordinates: [lng, lat] },
+          $maxDistance: SEARCH_RADIUS_METERS,
+        },
+      },
+    }).limit(20);
 
     let pointRisk = 0;
     for (const incident of nearbyIncidents) {
@@ -122,14 +116,14 @@ export async function scoreRoute(encodedPolyline, travelTime = new Date()) {
       incidentCount++;
     }
 
-    // Static risk from the precomputed grid (road type, lighting, POI
-    // density). If the grid hasn't been built for this area yet, treat it
-    // as neutral (0) rather than penalizing routes for missing data.
-    const staticRisk = nearestSegment ? nearestSegment.riskBase : 0;
-    if (staticRisk > 1) unlitPointCount++;
-    pointRisk += staticRisk;
+    const { risk: areaRisk, flags } = areaRiskForPoint([lat, lng], areaSignals);
+    if (flags.unlit) unlitPointCount++;
+    if (flags.isolated) isolatedPointCount++;
+    if (flags.hasPolice) policeNearbyCount++;
+    pointRisk += areaRisk;
 
-    // Lighting and reported incidents both matter more after dark.
+    // Everything matters more after dark: reported incidents, isolation,
+    // and lack of lighting are all riskier at night than at noon.
     pointRisk *= timeMultiplier;
     totalRisk += pointRisk;
 
@@ -146,6 +140,8 @@ export async function scoreRoute(encodedPolyline, travelTime = new Date()) {
     riskScore: Number(normalizedRisk.toFixed(2)),
     incidentCount,
     unlitPointCount,
+    isolatedPointCount,
+    policeNearbyCount,
     flaggedSegments,
     timeOfDay,
   };

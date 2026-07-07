@@ -1,8 +1,8 @@
 import jwt from "jsonwebtoken";
 import User from "../models/User.js";
+import generateToken from "../utils/generateToken.js";
 
-// Generate JWT Token
-const token = generateToken(user._id);
+
 
 // Register User
 export const registerUser = async (req, res) => {
@@ -27,7 +27,7 @@ export const registerUser = async (req, res) => {
 
     // Send response
     res.status(201).json({
-      token: signToken(user._id),
+      token: generateToken(user._id),
       user: {
         id: user._id,
         name: user.name,
@@ -58,7 +58,7 @@ export const loginUser = async (req, res) => {
 
     // Send response
     res.json({
-      token: signToken(user._id),
+      token: generateToken(user._id),
       user: {
         id: user._id,
         name: user.name,
