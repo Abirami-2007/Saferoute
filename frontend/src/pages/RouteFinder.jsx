@@ -1,7 +1,13 @@
 import { useState } from "react";
+import { Link } from "react-router-dom";
 import { MapContainer, TileLayer, Polyline, Marker, Popup } from "react-leaflet";
 import { fetchSafeRoutes } from "../api.js";
 import { decodePolyline } from "../utils/decodePolyline.js";
+import { useAuth } from "../context/AuthContext.jsx";
+import { useSocket } from "../context/SocketContext.jsx";
+import SOSButton from "../components/SOSButton.jsx";
+import LiveLocationToggle from "../components/LiveLocationToggle.jsx";
+import IncomingAlerts from "../components/IncomingAlerts.jsx";
 
 const RISK_COLORS = {
   low: "#16a34a",    // green
@@ -16,6 +22,8 @@ function riskLevel(score) {
 }
 
 export default function RouteFinder() {
+  const { user, logout } = useAuth();
+  const { connected } = useSocket();
   const [origin, setOrigin] = useState("");
   const [destination, setDestination] = useState("");
   const [loading, setLoading] = useState(false);
@@ -43,14 +51,49 @@ export default function RouteFinder() {
 
   return (
     <div className="flex flex-col h-screen md:flex-row">
+      <IncomingAlerts />
+
       {/* Sidebar */}
       <div className="w-full md:w-96 bg-white border-r border-slate-200 flex flex-col overflow-y-auto">
         <div className="p-5 border-b border-slate-100">
-          <div className="flex items-center gap-2">
-            <div className="h-9 w-9 rounded-full bg-brand-600 flex items-center justify-center text-white font-bold">S</div>
-            <h1 className="text-xl font-bold text-slate-800">SafeRoute</h1>
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <div className="h-9 w-9 rounded-full bg-brand-600 flex items-center justify-center text-white font-bold">S</div>
+              <h1 className="text-xl font-bold text-slate-800">SafeRoute</h1>
+            </div>
+            {user ? (
+              <div className="flex items-center gap-2">
+                <Link to="/contacts" className="text-xs font-semibold text-brand-600 hover:underline">
+                  Contacts
+                </Link>
+                <button onClick={logout} className="text-xs text-slate-400 hover:text-slate-600">
+                  Log out
+                </button>
+              </div>
+            ) : (
+              <Link to="/login" className="text-xs font-semibold text-brand-600 hover:underline">
+                Log in
+              </Link>
+            )}
           </div>
           <p className="text-sm text-slate-500 mt-1">Pick the route that's actually safe, not just fast.</p>
+
+          {user ? (
+            <div className="flex items-center justify-between mt-4 gap-3">
+              <SOSButton />
+              <LiveLocationToggle />
+            </div>
+          ) : (
+            <p className="text-xs text-slate-400 mt-3 bg-slate-50 rounded-lg p-2">
+              <Link to="/login" className="text-brand-600 font-semibold">
+                Log in
+              </Link>{" "}
+              to enable SOS alerts and live location sharing with your emergency contacts.
+            </p>
+          )}
+          {user && !connected && (
+            <p className="text-xs text-amber-600 mt-2">Reconnecting to alert service...</p>
+          )}
         </div>
 
         <form onSubmit={handleSubmit} className="p-5 space-y-3 border-b border-slate-100">

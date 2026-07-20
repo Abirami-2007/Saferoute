@@ -1,5 +1,5 @@
 import Incident from "../models/Incident.js";
-import { fetchAreaSignals, areaRiskForPoint } from "./chennaiSafetySignals.js";
+import { fetchAreaSignals, areaRiskForPoint, haversineMeters } from "./chennaiSafetySignals.js";
 
 /**
  * Decodes a Google polyline into an array of [lat, lng] points.
@@ -74,6 +74,21 @@ const NIGHT_MULTIPLIER = {
 
 const SEARCH_RADIUS_METERS = 150;
 
+// Rough meters-to-degrees conversion for padding a bounding box. Not exact
+// (longitude degrees shrink away from the equator), but plenty accurate for
+// a padding buffer at Chennai's latitude.
+function paddedBbox(points, paddingMeters) {
+  const paddingDeg = paddingMeters / 111000;
+  const lats = points.map((p) => p[0]);
+  const lngs = points.map((p) => p[1]);
+  return {
+    south: Math.min(...lats) - paddingDeg,
+    north: Math.max(...lats) + paddingDeg,
+    west: Math.min(...lngs) - paddingDeg,
+    east: Math.max(...lngs) + paddingDeg,
+  };
+}
+
 /**
  * Scores a single route by checking each sampled point against nearby
  * incident reports AND OSM-derived area signals (police proximity, activity
@@ -87,8 +102,24 @@ export async function scoreRoute(encodedPolyline, travelTime = new Date()) {
   const timeOfDay = getTimeOfDay(travelTime);
   const timeMultiplier = NIGHT_MULTIPLIER[timeOfDay];
 
-  // One Overpass call per route (not per point) to stay within fair-use limits.
+  // One Overpass call per route (grid-cached, see chennaiSafetySignals.js).
   const areaSignals = await fetchAreaSignals(samples);
+
+  // ONE MongoDB query for the whole route's bounding box, instead of one
+  // $near query per sample point (previously up to 20 round trips per
+  // route). We over-fetch slightly with $geoWithin, then filter each
+  // sample point's actual nearby incidents precisely in memory below.
+  const { south, west, north, east } = paddedBbox(samples, SEARCH_RADIUS_METERS);
+  const candidateIncidents = await Incident.find({
+    location: {
+      $geoWithin: {
+        $box: [
+          [west, south],
+          [east, north],
+        ],
+      },
+    },
+  }).limit(500);
 
   let totalRisk = 0;
   let incidentCount = 0;
@@ -98,17 +129,11 @@ export async function scoreRoute(encodedPolyline, travelTime = new Date()) {
   const flaggedSegments = [];
 
   for (const [lat, lng] of samples) {
-    const nearbyIncidents = await Incident.find({
-      location: {
-        $near: {
-          $geometry: { type: "Point", coordinates: [lng, lat] },
-          $maxDistance: SEARCH_RADIUS_METERS,
-        },
-      },
-    }).limit(20);
-
     let pointRisk = 0;
-    for (const incident of nearbyIncidents) {
+    for (const incident of candidateIncidents) {
+      const [ilng, ilat] = incident.location.coordinates;
+      if (haversineMeters([lat, lng], [ilat, ilng]) > SEARCH_RADIUS_METERS) continue;
+
       const weight = SEVERITY_WEIGHT[incident.category] ?? 1;
       // Incidents reported at a similar time of day are more relevant.
       const relevance = incident.timeOfDay === timeOfDay ? 1.3 : 1;

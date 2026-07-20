@@ -1,6 +1,4 @@
-import axios from "axios";
-
-const OVERPASS_URL = "https://overpass-api.de/api/interpreter";
+import OsmFeature from "../models/OsmFeature.js";
 
 function toRad(deg) {
   return (deg * Math.PI) / 180;
@@ -16,7 +14,10 @@ export function haversineMeters([lat1, lng1], [lat2, lng2]) {
   return 2 * R * Math.asin(Math.sqrt(a));
 }
 
-function bboxFromPoints(points, paddingDeg = 0.004) {
+// Padding must comfortably exceed the largest radius checked in
+// areaRiskForPoint() below (300m, for police) so we never miss a feature
+// just outside the sample points' immediate bbox.
+function paddedBbox(points, paddingDeg = 0.004) {
   const lats = points.map((p) => p[0]);
   const lngs = points.map((p) => p[1]);
   return {
@@ -27,101 +28,61 @@ function bboxFromPoints(points, paddingDeg = 0.004) {
   };
 }
 
-const EMPTY_SIGNALS = {
-  police: [],
-  activity: [],
-  lamps: [],
-  litWays: [],
-  unlitWays: [],
-  busyRoads: [],
-  quietRoads: [],
+const CATEGORY_TO_SIGNAL_KEY = {
+  police: "police",
+  activity: "activity",
+  lamp: "lamps",
+  lit_way: "litWays",
+  unlit_way: "unlitWays",
+  busy_road: "busyRoads",
+  quiet_road: "quietRoads",
 };
 
 /**
- * Queries Overpass once per route for several safety-relevant OSM layers,
- * scoped to work well for Chennai specifically.
+ * Reads safety-relevant OSM features (police, shops, roads, lighting) for a
+ * route's bounding box — from our own MongoDB collection, populated once via
+ * `npm run seed:osm` (see scripts/importOsmData.js). No external API call
+ * happens here; this is a single indexed local query.
  *
  * OSM's lit=* tag is sparsely and inconsistently applied in Chennai — roads
  * here are tagged by bus-route coverage, not lighting — so lighting is kept
- * as a minor secondary signal below. The primary signals are ones OSM
- * actually has decent coverage for in Chennai: police stations, shop/food
- * POI density (a footfall/activity proxy), and road classification
- * (busy arterial vs quiet residential/living_street).
+ * as a minor secondary signal below (see areaRiskForPoint). The primary
+ * signals are ones OSM actually has decent coverage for in Chennai: police
+ * stations, shop/food POI density (a footfall/activity proxy), and road
+ * classification (busy arterial vs quiet residential/living_street).
  */
 export async function fetchAreaSignals(points) {
-  const { south, west, north, east } = bboxFromPoints(points);
-  const bbox = `${south},${west},${north},${east}`;
+  const bbox = paddedBbox(points);
 
-  const query = `
-    [out:json][timeout:25];
-    (
-      node["amenity"="police"](${bbox});
-      way["amenity"="police"](${bbox});
-      node["shop"](${bbox});
-      node["amenity"~"^(restaurant|cafe|fast_food|pharmacy)$"](${bbox});
-      node["highway"="street_lamp"](${bbox});
-      way["lit"](${bbox});
-      way["highway"~"^(trunk|primary|secondary)$"](${bbox});
-      way["highway"~"^(living_street|residential|unclassified|track)$"](${bbox});
-    );
-    out center;
-  `;
+  const features = await OsmFeature.find({
+    location: {
+      $geoWithin: {
+        $box: [
+          [bbox.west, bbox.south],
+          [bbox.east, bbox.north],
+        ],
+      },
+    },
+  }).lean();
 
-  try {
-    const { data } = await axios.post(
-      OVERPASS_URL,
-      `data=${encodeURIComponent(query)}`,
-      {
-        headers: { "Content-Type": "application/x-www-form-urlencoded" },
-        timeout: 20000,
-      }
-    );
+  const signals = {
+    police: [],
+    activity: [],
+    lamps: [],
+    litWays: [],
+    unlitWays: [],
+    busyRoads: [],
+    quietRoads: [],
+  };
 
-    const signals = {
-      police: [],
-      activity: [],
-      lamps: [],
-      litWays: [],
-      unlitWays: [],
-      busyRoads: [],
-      quietRoads: [],
-    };
-
-    for (const el of data.elements) {
-      const coord =
-        el.type === "node"
-          ? [el.lat, el.lon]
-          : el.center
-          ? [el.center.lat, el.center.lon]
-          : null;
-      if (!coord) continue;
-
-      const tags = el.tags || {};
-
-      if (tags.amenity === "police") {
-        signals.police.push(coord);
-      } else if (tags.shop || ["restaurant", "cafe", "fast_food", "pharmacy"].includes(tags.amenity)) {
-        signals.activity.push(coord);
-      } else if (tags.highway === "street_lamp") {
-        signals.lamps.push(coord);
-      } else if (tags.lit === "yes") {
-        signals.litWays.push(coord);
-      } else if (tags.lit) {
-        signals.unlitWays.push(coord);
-      } else if (["trunk", "primary", "secondary"].includes(tags.highway)) {
-        signals.busyRoads.push(coord);
-      } else if (["living_street", "residential", "unclassified", "track"].includes(tags.highway)) {
-        signals.quietRoads.push(coord);
-      }
-    }
-
-    return signals;
-  } catch (err) {
-    console.error("Overpass query failed, skipping area signals:", err.message);
-    // Fail soft — if Overpass is slow or unreachable, scoring proceeds
-    // without these signals instead of breaking the request.
-    return EMPTY_SIGNALS;
+  for (const feature of features) {
+    const key = CATEGORY_TO_SIGNAL_KEY[feature.category];
+    if (!key) continue;
+    const [lng, lat] = feature.location.coordinates;
+    signals[key].push([lat, lng]);
   }
+
+  return signals;
 }
 
 /**
