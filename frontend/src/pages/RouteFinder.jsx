@@ -8,12 +8,19 @@ import { useSocket } from "../context/SocketContext.jsx";
 import SOSButton from "../components/SOSButton.jsx";
 import LiveLocationToggle from "../components/LiveLocationToggle.jsx";
 import IncomingAlerts from "../components/IncomingAlerts.jsx";
+import LocationAutocomplete from "../components/LocationAutocomplete.jsx";
 
 const RISK_COLORS = {
-  low: "#16a34a",    // green
-  medium: "#f59e0b", // amber
-  high: "#dc2626",   // red
+  low: "#16a34a",
+  medium: "#f59e0b",
+  high: "#dc2626",
 };
+
+const TRAVEL_MODES = [
+  { value: "foot-walking", label: "Walking" },
+  { value: "driving-car", label: "Driving" },
+  { value: "cycling-regular", label: "Cycling" },
+];
 
 function riskLevel(score) {
   if (score < 2) return "low";
@@ -24,26 +31,35 @@ function riskLevel(score) {
 export default function RouteFinder() {
   const { user, logout } = useAuth();
   const { connected } = useSocket();
-  const [origin, setOrigin] = useState("");
-  const [destination, setDestination] = useState("");
+  const [origin, setOrigin] = useState(null); // { label, lat, lng } | null
+  const [destination, setDestination] = useState(null);
+  const [profile, setProfile] = useState("foot-walking");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [result, setResult] = useState(null);
   const [selectedIdx, setSelectedIdx] = useState(0);
 
-  const center = [13.0827, 80.2707]; // Chennai default center
+  const center = [12.92, 80.23]; // Neelankarai–Sholinganallur corridor
 
   async function handleSubmit(e) {
     e.preventDefault();
     setError("");
+
+    if (!origin || !destination) {
+      setError("Pick both locations from the suggestion list — typing alone isn't enough to find the exact spot.");
+      return;
+    }
+
     setLoading(true);
     setResult(null);
     try {
-      const data = await fetchSafeRoutes(origin, destination);
+      const originStr = `${origin.lat},${origin.lng}`;
+      const destStr = `${destination.lat},${destination.lng}`;
+      const data = await fetchSafeRoutes(originStr, destStr, undefined, profile);
       setResult(data);
       setSelectedIdx(data.routes.findIndex((r) => r === data.recommended) ?? 0);
     } catch (err) {
-      setError(err.response?.data?.message || "Could not fetch routes. Check your API key and locations.");
+      setError(err.response?.data?.message || "Could not fetch routes.");
     } finally {
       setLoading(false);
     }
@@ -97,26 +113,40 @@ export default function RouteFinder() {
         </div>
 
         <form onSubmit={handleSubmit} className="p-5 space-y-3 border-b border-slate-100">
+          <LocationAutocomplete
+            label="From"
+            placeholder="Search for a starting point"
+            onSelect={setOrigin}
+          />
+          <LocationAutocomplete
+            label="To"
+            placeholder="Search for a destination"
+            onSelect={setDestination}
+          />
+
           <div>
-            <label className="text-xs font-semibold text-slate-500 uppercase tracking-wide">From</label>
-            <input
-              className="w-full mt-1 px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500"
-              placeholder="Current location or address"
-              value={origin}
-              onChange={(e) => setOrigin(e.target.value)}
-              required
-            />
+            <label className="text-xs font-semibold text-slate-500 uppercase tracking-wide">Travel mode</label>
+            <div className="flex gap-2 mt-1">
+              {TRAVEL_MODES.map((mode) => (
+                <button
+                  key={mode.value}
+                  type="button"
+                  onClick={() => setProfile(mode.value)}
+                  className={`flex-1 text-xs font-semibold py-1.5 rounded-lg border transition ${
+                    profile === mode.value
+                      ? "bg-brand-600 border-brand-600 text-white"
+                      : "bg-white border-slate-300 text-slate-600 hover:border-slate-400"
+                  }`}
+                >
+                  {mode.label}
+                </button>
+              ))}
+            </div>
+            <p className="text-[11px] text-slate-400 mt-1">
+              Bus/transit routing isn't available yet — walking, driving, and cycling only.
+            </p>
           </div>
-          <div>
-            <label className="text-xs font-semibold text-slate-500 uppercase tracking-wide">To</label>
-            <input
-              className="w-full mt-1 px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-500"
-              placeholder="Destination"
-              value={destination}
-              onChange={(e) => setDestination(e.target.value)}
-              required
-            />
-          </div>
+
           <button
             type="submit"
             disabled={loading}

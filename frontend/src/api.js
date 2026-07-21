@@ -4,17 +4,21 @@ const api = axios.create({
   baseURL: import.meta.env.VITE_API_URL || "http://localhost:5000/api",
 });
 
-// Attach the JWT (if we have one) to every outgoing request automatically,
-// instead of remembering to pass headers manually at every call site.
+// Attach the JWT (if we have one) to every outgoing request automatically.
 api.interceptors.request.use((config) => {
   const token = localStorage.getItem("saferoute_token");
   if (token) config.headers.Authorization = `Bearer ${token}`;
   return config;
 });
 
-export async function fetchSafeRoutes(origin, destination, departureTime) {
-  const { data } = await api.post("/routes/safe", { origin, destination, departureTime });
+export async function fetchSafeRoutes(origin, destination, departureTime, profile = "foot-walking") {
+  const { data } = await api.post("/routes/safe", { origin, destination, departureTime, profile });
   return data;
+}
+
+export async function autocompletePlaces(text) {
+  const { data } = await api.get("/routes/autocomplete", { params: { text } });
+  return data.suggestions;
 }
 
 export async function login(email, password) {
